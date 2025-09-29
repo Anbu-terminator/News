@@ -1,7 +1,6 @@
 // server/aiService.ts
 import axios from "axios";
 import fetch from "node-fetch";
-import pdfParse from "pdf-parse";
 import { load } from "cheerio";
 import OpenAI from "openai";
 import * as puppeteer from "puppeteer";
