@@ -19,7 +19,7 @@ interface TranscriptResponse {
 
 // -------------------- CONFIG --------------------
 const HUGGINGFACE_API_KEY =
-  process.env.HF_TOKEN || "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";
+  process.env.HF_TOKEN || "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";
 const YOUTUBE_API_KEY = "AIzaSyDx0Ayoy52jC6f6ZvNyW1B_biL7Bjjgh34";
 const SUMMARIZER_MODEL = "facebook/bart-large-cnn";
 
