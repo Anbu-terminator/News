@@ -13,6 +13,7 @@ import { FileText, Link, Upload, Youtube, Loader2 } from "lucide-react";
 export default function Summarizer() {
   const [inputText, setInputText] = useState("");
   const [summary, setSummary] = useState("");
+  const [errorMsg, setErrorMsg] = useState(""); // NEW: store error messages
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<"text" | "url" | "pdf" | "youtube">("text");
   const { toast } = useToast();
@@ -41,6 +42,7 @@ export default function Summarizer() {
 
     setLoading(true);
     setSummary("");
+    setErrorMsg("");
 
     try {
       let payloadInput = inputText;
@@ -70,14 +72,15 @@ export default function Summarizer() {
         setSummary(summaryText.trim());
         toast({ title: "Summary generated!", description: "Your content has been successfully summarized" });
       } else {
-        const serverMsg = parsed?.error || parsed?.message || parsed?.detail || null;
-        throw new Error(serverMsg || "Invalid response from server");
+        const serverMsg = parsed?.error || parsed?.message || parsed?.detail || "Invalid response from server";
+        setErrorMsg(serverMsg);
+        throw new Error(serverMsg);
       }
     } catch (error: any) {
       console.error("Summarizer error:", error);
       toast({
         title: "Error",
-        description: (error && error.message) ? error.message : "Failed to generate summary. Please try again.",
+        description: error?.message || "Failed to generate summary. Please try again.",
         variant: "destructive",
       });
     } finally {
@@ -88,6 +91,7 @@ export default function Summarizer() {
   const handleReset = () => {
     setInputText("");
     setSummary("");
+    setErrorMsg("");
   };
 
   const handlePdfUpload = (file: File) => {
@@ -119,7 +123,7 @@ export default function Summarizer() {
           <Tabs value={activeTab} onValueChange={(v: string) => setActiveTab(v as "text" | "url" | "pdf" | "youtube")}>
             <TabsList className="grid w-full grid-cols-4">
               <TabsTrigger value="text"><FileText className="w-4 h-4 mr-2" />Text</TabsTrigger>
-              <TabsTrigger value="text"><FileText className="w-4 h-4 mr-2" />PDF Text</TabsTrigger>
+             <TabsTrigger value="text"><FileText className="w-4 h-4 mr-2" />PDF Text</TabsTrigger>
               <TabsTrigger value="url"><Link className="w-4 h-4 mr-2" />URL</TabsTrigger>
               <TabsTrigger value="youtube"><Youtube className="w-4 h-4 mr-2" />YouTube</TabsTrigger>
             </TabsList>
@@ -184,11 +188,13 @@ export default function Summarizer() {
           </div>
         </Card>
 
-        {summary && (
+        {(summary || errorMsg) && (
           <Card className="p-6 mt-6">
             <h2 className="text-xl font-semibold mb-4">Summary:</h2>
             <div className="bg-muted p-4 rounded-lg">
-              <p className="text-muted-foreground leading-relaxed whitespace-pre-wrap">{summary}</p>
+              <p className="text-muted-foreground leading-relaxed whitespace-pre-wrap">
+                {summary || `⚠️ ${errorMsg}`}
+              </p>
             </div>
           </Card>
         )}
