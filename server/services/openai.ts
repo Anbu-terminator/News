@@ -1,4 +1,3 @@
-// server/aiService.ts
 import axios from "axios";
 import fetch from "node-fetch";
 import * as puppeteer from "puppeteer";
@@ -12,7 +11,10 @@ if (!HUGGINGFACE_API_KEY) {
 }
 
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
-const SUMMARIZER_MODEL = "facebook/bart-large-cnn";
+
+// ✅ Free HF models
+const SUMMARIZER_MODEL = "sshleifer/distilbart-cnn-12-6";
+const CHAT_MODEL = "mistralai/Mistral-7B-Instruct-v0.2";
 
 // -------------------- LOCAL RULE-BASED TEXT SUMMARIZER --------------------
 export function ruleBasedTextSummarizer(text: string): string {
@@ -22,11 +24,7 @@ export function ruleBasedTextSummarizer(text: string): string {
     .filter(Boolean);
   if (sentences.length <= 2) return text;
   const summaryCount = Math.min(3, sentences.length);
-  const summaryIndices = [
-    0,
-    Math.floor(sentences.length / 2),
-    sentences.length - 1,
-  ].slice(0, summaryCount);
+  const summaryIndices = [0, Math.floor(sentences.length / 2), sentences.length - 1].slice(0, summaryCount);
   return summaryIndices.map((i) => sentences[i]).join(". ") + ".";
 }
 
@@ -36,15 +34,6 @@ async function hfSummarize(text: string): Promise<string> {
     const cleaned = text.replace(/\s+/g, " ").trim();
     if (!cleaned) return "No text to summarize.";
 
-    // Truncate long text
-    const MAX_WORDS = 700;
-    const words = cleaned.split(" ");
-    const truncatedText =
-      words.length > MAX_WORDS ? words.slice(0, MAX_WORDS).join(" ") : cleaned;
-
-    if (truncatedText.split(" ").length < 10)
-      return "Text too short to summarize.";
-
     const response = await fetch(
       `https://api-inference.huggingface.co/models/${SUMMARIZER_MODEL}`,
       {
@@ -53,18 +42,14 @@ async function hfSummarize(text: string): Promise<string> {
           Authorization: `Bearer ${HUGGINGFACE_API_KEY}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          inputs: truncatedText,
-          parameters: { max_length: 180, min_length: 50, do_sample: false },
-        }),
+        body: JSON.stringify({ inputs: cleaned }),
       }
     );
 
     const result: any = await response.json();
 
-    if (Array.isArray(result) && result[0]?.summary_text)
-      return result[0].summary_text;
-    if (result?.generated_text) return result.generated_text;
+    if (Array.isArray(result) && result[0]?.summary_text) return result[0].summary_text;
+    if (result?.summary_text) return result.summary_text;
 
     console.error("HF Summarizer unexpected response:", result);
     return "Summarization failed. HF API returned no summary.";
@@ -80,43 +65,30 @@ export async function summarizeText(
   type: "text" | "link" | "youtube" | "pdf" = "text"
 ): Promise<string> {
   try {
-    // -------- TEXT --------
     if (type === "text" && typeof input === "string") {
       return await hfSummarize(input);
     }
 
-    // -------- ARTICLE URL --------
     if (type === "link" && typeof input === "string") {
-      const browser = await puppeteer.launch({
-        headless: true,
-        args: ["--no-sandbox"],
-      });
+      const browser = await puppeteer.launch({ headless: "new", args: ["--no-sandbox"] });
       const page = await browser.newPage();
       await page.goto(input, { waitUntil: "networkidle2" });
 
       await page.evaluate(() => {
-        const elements = Array.from(
-          document.querySelectorAll("script, style, noscript, iframe")
-        );
-        elements.forEach((el) => el.remove());
+        document.querySelectorAll("script, style, noscript, iframe").forEach((el) => el.remove());
       });
 
-      const textContent: string = await page.evaluate(
-        () => document.body.innerText || ""
-      );
+      const textContent: string = await page.evaluate(() => document.body.innerText || "");
       await browser.close();
 
       const cleanedText = textContent.replace(/\s+/g, " ").trim();
-      if (!cleanedText)
-        return "Failed to extract text. Please copy-paste article content.";
+      if (!cleanedText) return "Failed to extract text. Please copy-paste article content.";
 
       return await hfSummarize(cleanedText);
     }
 
-    // -------- YOUTUBE --------
     if (type === "youtube" && typeof input === "string") {
-      const videoIdMatch =
-        input.match(/v=([^&]+)/) || input.match(/youtu\.be\/([^?]+)/);
+      const videoIdMatch = input.match(/v=([^&]+)/) || input.match(/youtu\.be\/([^?]+)/);
       if (!videoIdMatch) return "Invalid YouTube URL.";
       const videoId = videoIdMatch[1];
 
@@ -129,32 +101,11 @@ export async function summarizeText(
 
         const snippet = response.data.items[0].snippet;
         const textContent = `Title: ${snippet.title}\nDescription: ${snippet.description}`;
-        const cleanedText = textContent.replace(/\s+/g, " ").trim();
-
-        if (cleanedText.split(" ").length < 10) {
-          return ruleBasedTextSummarizer(cleanedText);
-        }
-
-        return await hfSummarize(cleanedText);
+        return await hfSummarize(textContent);
       } catch (err: any) {
         console.error("YouTube Data API error:", err.message || err);
         return "Unable to fetch video details. Please provide text manually.";
       }
-    }
-
-    // -------- PDF --------
-    if (type === "pdf") {
-      let buffer: Buffer;
-      if (Buffer.isBuffer(input)) buffer = input;
-      else if (typeof input === "string")
-        buffer = Buffer.from(input, "utf-8");
-      else return "Invalid PDF input.";
-
-      const pdfData = await pdfParse(buffer);
-      const textContent = pdfData.text?.trim();
-      if (!textContent) return "Failed to extract text from PDF.";
-
-      return await hfSummarize(textContent);
     }
 
     return "Invalid input type.";
@@ -164,14 +115,11 @@ export async function summarizeText(
   }
 }
 
-// -------------------- CHATBOT (Hugging Face Inference API) --------------------
-export async function chatWithAI(
-  message: string,
-  context?: string
-): Promise<string> {
+// -------------------- CHATBOT --------------------
+export async function chatWithAI(message: string, context?: string): Promise<string> {
   try {
     const response = await fetch(
-      "https://api-inference.huggingface.co/models/tiiuae/falcon-7b-instruct",
+      `https://api-inference.huggingface.co/models/${CHAT_MODEL}`,
       {
         method: "POST",
         headers: {
@@ -179,17 +127,14 @@ export async function chatWithAI(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          inputs: `You are a helpful news assistant.\nContext: ${
-            context || "None"
-          }\nUser: ${message}\nAssistant:`,
+          inputs: `You are a helpful news assistant.\nContext: ${context || "None"}\nUser: ${message}\nAssistant:`,
         }),
       }
     );
 
     const result: any = await response.json();
 
-    if (Array.isArray(result) && result[0]?.generated_text)
-      return result[0].generated_text;
+    if (Array.isArray(result) && result[0]?.generated_text) return result[0].generated_text;
     if (result?.generated_text) return result.generated_text;
 
     console.error("HF Chat response unexpected:", result);
