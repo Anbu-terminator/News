@@ -1,33 +1,18 @@
 // server/aiService.ts
 import axios from "axios";
 import fetch from "node-fetch";
-import { load } from "cheerio";
-import OpenAI from "openai";
 import * as puppeteer from "puppeteer";
-
-interface TranscriptEntry {
-  text: string;
-  duration: number;
-  offset: number;
-}
-
-interface TranscriptResponse {
-  text: string;
-  duration: number;
-  offset: number;
-}
 
 // -------------------- CONFIG --------------------
 const HUGGINGFACE_API_KEY =
   process.env.HUGGINGFACE_API_KEY || process.env.HF_TOKEN;
-const YOUTUBE_API_KEY = "AIzaSyDx0Ayoy52jC6f6ZvNyW1B_biL7Bjjgh34";
-const SUMMARIZER_MODEL = "facebook/bart-large-cnn";
 
-// -------------------- OpenAI client (via HuggingFace Router) --------------------
-const client = new OpenAI({
-  baseURL: "https://router.huggingface.co/v1",
-  apiKey: HUGGINGFACE_API_KEY,
-});
+if (!HUGGINGFACE_API_KEY) {
+  throw new Error("❌ Hugging Face API key missing. Add it to .env as HUGGINGFACE_API_KEY or HF_TOKEN");
+}
+
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
+const SUMMARIZER_MODEL = "facebook/bart-large-cnn";
 
 // -------------------- LOCAL RULE-BASED TEXT SUMMARIZER --------------------
 export function ruleBasedTextSummarizer(text: string): string {
@@ -37,10 +22,11 @@ export function ruleBasedTextSummarizer(text: string): string {
     .filter(Boolean);
   if (sentences.length <= 2) return text;
   const summaryCount = Math.min(3, sentences.length);
-  const summaryIndices = [0, Math.floor(sentences.length / 2), sentences.length - 1].slice(
+  const summaryIndices = [
     0,
-    summaryCount
-  );
+    Math.floor(sentences.length / 2),
+    sentences.length - 1,
+  ].slice(0, summaryCount);
   return summaryIndices.map((i) => sentences[i]).join(". ") + ".";
 }
 
@@ -48,32 +34,36 @@ export function ruleBasedTextSummarizer(text: string): string {
 async function hfSummarize(text: string): Promise<string> {
   try {
     const cleaned = text.replace(/\s+/g, " ").trim();
-
     if (!cleaned) return "No text to summarize.";
 
-    // Truncate long text to ~700 words
+    // Truncate long text
     const MAX_WORDS = 700;
     const words = cleaned.split(" ");
-    const truncatedText = words.length > MAX_WORDS ? words.slice(0, MAX_WORDS).join(" ") : cleaned;
+    const truncatedText =
+      words.length > MAX_WORDS ? words.slice(0, MAX_WORDS).join(" ") : cleaned;
 
-    // Ensure minimum length
-    if (truncatedText.split(" ").length < 10) return "Text too short to summarize.";
+    if (truncatedText.split(" ").length < 10)
+      return "Text too short to summarize.";
 
-    const response = await fetch(`https://api-inference.huggingface.co/models/${SUMMARIZER_MODEL}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${HUGGINGFACE_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        inputs: truncatedText,
-        parameters: { max_length: 180, min_length: 50, do_sample: false },
-      }),
-    });
+    const response = await fetch(
+      `https://api-inference.huggingface.co/models/${SUMMARIZER_MODEL}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${HUGGINGFACE_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          inputs: truncatedText,
+          parameters: { max_length: 180, min_length: 50, do_sample: false },
+        }),
+      }
+    );
 
     const result: any = await response.json();
 
-    if (Array.isArray(result) && result[0]?.summary_text) return result[0].summary_text;
+    if (Array.isArray(result) && result[0]?.summary_text)
+      return result[0].summary_text;
     if (result?.generated_text) return result.generated_text;
 
     console.error("HF Summarizer unexpected response:", result);
@@ -97,27 +87,36 @@ export async function summarizeText(
 
     // -------- ARTICLE URL --------
     if (type === "link" && typeof input === "string") {
-      const browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox"] });
+      const browser = await puppeteer.launch({
+        headless: true,
+        args: ["--no-sandbox"],
+      });
       const page = await browser.newPage();
       await page.goto(input, { waitUntil: "networkidle2" });
 
       await page.evaluate(() => {
-        const elements = Array.from(document.querySelectorAll("script, style, noscript, iframe"));
+        const elements = Array.from(
+          document.querySelectorAll("script, style, noscript, iframe")
+        );
         elements.forEach((el) => el.remove());
       });
 
-      const textContent: string = await page.evaluate(() => document.body.innerText || "");
+      const textContent: string = await page.evaluate(
+        () => document.body.innerText || ""
+      );
       await browser.close();
 
       const cleanedText = textContent.replace(/\s+/g, " ").trim();
-      if (!cleanedText) return "Failed to extract text. Please copy-paste article content.";
+      if (!cleanedText)
+        return "Failed to extract text. Please copy-paste article content.";
 
       return await hfSummarize(cleanedText);
     }
 
-    // -------- YOUTUBE (Data API) --------
+    // -------- YOUTUBE --------
     if (type === "youtube" && typeof input === "string") {
-      const videoIdMatch = input.match(/v=([^&]+)/) || input.match(/youtu\.be\/([^?]+)/);
+      const videoIdMatch =
+        input.match(/v=([^&]+)/) || input.match(/youtu\.be\/([^?]+)/);
       if (!videoIdMatch) return "Invalid YouTube URL.";
       const videoId = videoIdMatch[1];
 
@@ -130,10 +129,8 @@ export async function summarizeText(
 
         const snippet = response.data.items[0].snippet;
         const textContent = `Title: ${snippet.title}\nDescription: ${snippet.description}`;
-
         const cleanedText = textContent.replace(/\s+/g, " ").trim();
 
-        // If text is too short, use rule-based summarizer
         if (cleanedText.split(" ").length < 10) {
           return ruleBasedTextSummarizer(cleanedText);
         }
@@ -149,7 +146,8 @@ export async function summarizeText(
     if (type === "pdf") {
       let buffer: Buffer;
       if (Buffer.isBuffer(input)) buffer = input;
-      else if (typeof input === "string") buffer = Buffer.from(input, "utf-8");
+      else if (typeof input === "string")
+        buffer = Buffer.from(input, "utf-8");
       else return "Invalid PDF input.";
 
       const pdfData = await pdfParse(buffer);
@@ -166,30 +164,42 @@ export async function summarizeText(
   }
 }
 
-// -------------------- CHATBOT (via HuggingFace Router) --------------------
-export async function chatWithAI(message: string, context?: string): Promise<string> {
+// -------------------- CHATBOT (Hugging Face Inference API) --------------------
+export async function chatWithAI(
+  message: string,
+  context?: string
+): Promise<string> {
   try {
-    const completion = await client.chat.completions.create({
-      model: "deepseek-ai/DeepSeek-R1:fireworks-ai",
-      messages: [
-        {
-          role: "user",
-          content: `
-You are a helpful, concise news assistant chatbot.
-Answer factual questions only based on news knowledge.
-Context: ${context || "None"}
-Question: ${message}
-`,
+    const response = await fetch(
+      "https://api-inference.huggingface.co/models/tiiuae/falcon-7b-instruct",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${HUGGINGFACE_API_KEY}`,
+          "Content-Type": "application/json",
         },
-      ],
-    });
+        body: JSON.stringify({
+          inputs: `You are a helpful news assistant.\nContext: ${
+            context || "None"
+          }\nUser: ${message}\nAssistant:`,
+        }),
+      }
+    );
 
-    return completion.choices[0].message?.content || "No response";
+    const result: any = await response.json();
+
+    if (Array.isArray(result) && result[0]?.generated_text)
+      return result[0].generated_text;
+    if (result?.generated_text) return result.generated_text;
+
+    console.error("HF Chat response unexpected:", result);
+    return "No response from AI.";
   } catch (err: any) {
     console.error("Error in chatWithAI:", err.message || err);
     return "AI model unavailable.";
   }
 }
+
 
 // -------------------- FAKE NEWS DETECTION --------------------
 export async function detectFakeNews(text: string): Promise<{ isReal: boolean; confidence: number; reasoning: string }> {
