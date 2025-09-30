@@ -1,20 +1,29 @@
 import axios from "axios";
 import fetch from "node-fetch";
 import * as puppeteer from "puppeteer";
+import OpenAI from "openai";
 
 // -------------------- CONFIG --------------------
 const HUGGINGFACE_API_KEY =
   process.env.HUGGINGFACE_API_KEY || process.env.HF_TOKEN;
 
 if (!HUGGINGFACE_API_KEY) {
-  throw new Error("❌ Hugging Face API key missing. Add it to .env as HUGGINGFACE_API_KEY or HF_TOKEN");
+  throw new Error(
+    "❌ Hugging Face API key missing. Add it to .env as HUGGINGFACE_API_KEY or HF_TOKEN"
+  );
 }
 
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 
 // ✅ Free HF models
-const SUMMARIZER_MODEL = "sshleifer/distilbart-cnn-12-6";
-const CHAT_MODEL = "mistralai/Mistral-7B-Instruct-v0.2";
+const SUMMARIZER_MODEL = "sshleifer/distilbart-cnn-12-6"; // Extractive summarizer
+const CHAT_MODEL = "mistralai/Mixtral-8x7B-Instruct-v0.1"; // Router chat model
+
+// Create Hugging Face OpenAI-compatible client
+export const client = new OpenAI({
+  baseURL: "https://router.huggingface.co/v1",
+  apiKey: HUGGINGFACE_API_KEY,
+});
 
 // -------------------- LOCAL RULE-BASED TEXT SUMMARIZER --------------------
 export function ruleBasedTextSummarizer(text: string): string {
@@ -24,7 +33,11 @@ export function ruleBasedTextSummarizer(text: string): string {
     .filter(Boolean);
   if (sentences.length <= 2) return text;
   const summaryCount = Math.min(3, sentences.length);
-  const summaryIndices = [0, Math.floor(sentences.length / 2), sentences.length - 1].slice(0, summaryCount);
+  const summaryIndices = [
+    0,
+    Math.floor(sentences.length / 2),
+    sentences.length - 1,
+  ].slice(0, summaryCount);
   return summaryIndices.map((i) => sentences[i]).join(". ") + ".";
 }
 
@@ -34,6 +47,7 @@ async function hfSummarize(text: string): Promise<string> {
     const cleaned = text.replace(/\s+/g, " ").trim();
     if (!cleaned) return "No text to summarize.";
 
+    // 🔑 Using Hugging Face inference API directly
     const response = await fetch(
       `https://api-inference.huggingface.co/models/${SUMMARIZER_MODEL}`,
       {
@@ -48,7 +62,8 @@ async function hfSummarize(text: string): Promise<string> {
 
     const result: any = await response.json();
 
-    if (Array.isArray(result) && result[0]?.summary_text) return result[0].summary_text;
+    if (Array.isArray(result) && result[0]?.summary_text)
+      return result[0].summary_text;
     if (result?.summary_text) return result.summary_text;
 
     console.error("HF Summarizer unexpected response:", result);
@@ -70,25 +85,34 @@ export async function summarizeText(
     }
 
     if (type === "link" && typeof input === "string") {
-      const browser = await puppeteer.launch({ headless: "new", args: ["--no-sandbox"] });
+      const browser = await puppeteer.launch({
+        headless: "new",
+        args: ["--no-sandbox"],
+      });
       const page = await browser.newPage();
       await page.goto(input, { waitUntil: "networkidle2" });
 
       await page.evaluate(() => {
-        document.querySelectorAll("script, style, noscript, iframe").forEach((el) => el.remove());
+        document
+          .querySelectorAll("script, style, noscript, iframe")
+          .forEach((el) => el.remove());
       });
 
-      const textContent: string = await page.evaluate(() => document.body.innerText || "");
+      const textContent: string = await page.evaluate(
+        () => document.body.innerText || ""
+      );
       await browser.close();
 
       const cleanedText = textContent.replace(/\s+/g, " ").trim();
-      if (!cleanedText) return "Failed to extract text. Please copy-paste article content.";
+      if (!cleanedText)
+        return "Failed to extract text. Please copy-paste article content.";
 
       return await hfSummarize(cleanedText);
     }
 
     if (type === "youtube" && typeof input === "string") {
-      const videoIdMatch = input.match(/v=([^&]+)/) || input.match(/youtu\.be\/([^?]+)/);
+      const videoIdMatch =
+        input.match(/v=([^&]+)/) || input.match(/youtu\.be\/([^?]+)/);
       if (!videoIdMatch) return "Invalid YouTube URL.";
       const videoId = videoIdMatch[1];
 
@@ -116,58 +140,127 @@ export async function summarizeText(
 }
 
 // -------------------- CHATBOT --------------------
-export async function chatWithAI(message: string, context?: string): Promise<string> {
+export async function chatWithAI(
+  message: string,
+  context?: string
+): Promise<string> {
   try {
-    const response = await fetch(
-      `https://api-inference.huggingface.co/models/${CHAT_MODEL}`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${HUGGINGFACE_API_KEY}`,
-          "Content-Type": "application/json",
+    const completion = await client.chat.completions.create({
+      model: CHAT_MODEL,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a helpful news assistant. Answer clearly and concisely.",
         },
-        body: JSON.stringify({
-          inputs: `You are a helpful news assistant.\nContext: ${context || "None"}\nUser: ${message}\nAssistant:`,
-        }),
-      }
-    );
+        {
+          role: "user",
+          content: context
+            ? `Context: ${context}\nUser: ${message}`
+            : message,
+        },
+      ],
+      temperature: 0.3,
+      max_tokens: 500,
+    });
 
-    const result: any = await response.json();
+    const reply = completion.choices?.[0]?.message?.content;
+    if (!reply || !reply.trim()) {
+      throw new Error("Empty response from AI");
+    }
 
-    if (Array.isArray(result) && result[0]?.generated_text) return result[0].generated_text;
-    if (result?.generated_text) return result.generated_text;
-
-    console.error("HF Chat response unexpected:", result);
-    return "No response from AI.";
+    return reply.trim();
   } catch (err: any) {
-    console.error("Error in chatWithAI:", err.message || err);
+    console.error("Error in chatWithAI:", err.response?.data || err.message);
     return "AI model unavailable.";
   }
 }
 
-
 // -------------------- FAKE NEWS DETECTION --------------------
-export async function detectFakeNews(text: string): Promise<{ isReal: boolean; confidence: number; reasoning: string }> {
+export async function detectFakeNews(text: string): Promise<{
+  isReal: boolean;
+  confidence: number;
+  reasoning: string;
+}> {
   const trustedSources = [
-    "the hindu", "times of india", "indian express", "hindustan times", "ndtv",
-    "business standard", "mint", "economic times", "deccan herald", "the telegraph india",
-    "dna india", "outlook india", "livemint", "news18", "pti", "dina thanthi", "dinamalar",
-    "dinakaran", "maalaimalar", "puthiya thalaimurai", "polimer news", "sun tv", "vikatan",
-    "ananda vikatan", "malayala manorama", "mathrubhumi", "eenadu", "sakshi", "lokmat",
-    "gujarat samachar", "rajasthan patrika", "punjab kesari",
-    "bbc", "reuters", "ap news", "associated press", "the guardian", "cnn", "new york times",
-    "washington post", "the economist", "financial times", "wall street journal", "bloomberg",
-    "al jazeera", "sky news", "abc news", "cbs news", "nbc news", "fox news", "the times uk",
+    "the hindu",
+    "times of india",
+    "indian express",
+    "hindustan times",
+    "ndtv",
+    "business standard",
+    "mint",
+    "economic times",
+    "deccan herald",
+    "the telegraph india",
+    "dna india",
+    "outlook india",
+    "livemint",
+    "news18",
+    "pti",
+    "dina thanthi",
+    "dinamalar",
+    "dinakaran",
+    "maalaimalar",
+    "puthiya thalaimurai",
+    "polimer news",
+    "sun tv",
+    "vikatan",
+    "ananda vikatan",
+    "malayala manorama",
+    "mathrubhumi",
+    "eenadu",
+    "sakshi",
+    "lokmat",
+    "gujarat samachar",
+    "rajasthan patrika",
+    "punjab kesari",
+    "bbc",
+    "reuters",
+    "ap news",
+    "associated press",
+    "the guardian",
+    "cnn",
+    "new york times",
+    "washington post",
+    "the economist",
+    "financial times",
+    "wall street journal",
+    "bloomberg",
+    "al jazeera",
+    "sky news",
+    "abc news",
+    "cbs news",
+    "nbc news",
+    "fox news",
+    "the times uk",
     "the telegraph uk",
-    "nature", "science magazine", "scientific american", "techcrunch", "wired", "the verge",
-    "ars technica", "engadget", "cnet", "forbes", "fortune", "business insider", "marketwatch",
-    "yahoo finance", "cnbc", "investopedia",
+    "nature",
+    "science magazine",
+    "scientific american",
+    "techcrunch",
+    "wired",
+    "the verge",
+    "ars technica",
+    "engadget",
+    "cnet",
+    "forbes",
+    "fortune",
+    "business insider",
+    "marketwatch",
+    "yahoo finance",
+    "cnbc",
+    "investopedia",
   ];
 
   const lowerText = text.toLowerCase();
   for (const src of trustedSources) {
     if (lowerText.includes(src)) {
-      return { isReal: true, confidence: 0.95, reasoning: `Trusted source: ${src}` };
+      return {
+        isReal: true,
+        confidence: 0.95,
+        reasoning: `Trusted source: ${src}`,
+      };
     }
   }
 
@@ -177,7 +270,7 @@ USER: Text to analyze: ${text}`;
 
   try {
     const completion = await client.chat.completions.create({
-      model: "deepseek-ai/DeepSeek-R1:fireworks-ai",
+      model: "mistralai/Mixtral-8x7B-Instruct-v0.1",
       messages: [{ role: "user", content: prompt }],
     });
 
@@ -192,12 +285,19 @@ USER: Text to analyze: ${text}`;
     };
   } catch (err: any) {
     console.error("Fake news detection error:", err.message || err);
-    return { isReal: false, confidence: 0.3, reasoning: "Temporarily unavailable - try again later" };
+    return {
+      isReal: false,
+      confidence: 0.3,
+      reasoning: "Temporarily unavailable - try again later",
+    };
   }
 }
 
 // -------------------- YouTube helper --------------------
-export async function fetchYouTubeVideos(query: string, maxResults: number = 5): Promise<any[]> {
+export async function fetchYouTubeVideos(
+  query: string,
+  maxResults: number = 5
+): Promise<any[]> {
   try {
     const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&q=${encodeURIComponent(
       query
